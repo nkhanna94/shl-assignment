@@ -2,13 +2,11 @@
 import json
 import os
 import re
+import string
 from pathlib import Path
-from typing import Optional
 
-import numpy as np
-import faiss
+from rank_bm25 import BM25Okapi
 from groq import Groq
-from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -30,30 +28,38 @@ TEST_TYPE_MAP = {
     "S": "Simulations",
 }
 
-# Build text representation of each catalog item for embedding
-def item_to_text(item: dict) -> str:
-    types = ", ".join(TEST_TYPE_MAP.get(t, t) for t in item["test_types"])
-    remote = "remote testing supported" if item["remote_testing"] else "not remote"
-    adaptive = "adaptive/IRT" if item["adaptive_irt"] else ""
-    parts = [item["name"], types, remote]
-    if adaptive:
-        parts.append(adaptive)
-    return ". ".join(p for p in parts if p)
+TYPE_KEYWORDS = {
+    "A": ["ability", "aptitude", "reasoning", "numerical", "verbal", "inductive", "deductive", "cognitive"],
+    "B": ["biodata", "situational", "judgement", "judgment", "sjt"],
+    "C": ["competenc", "competency", "framework", "ucf"],
+    "D": ["development", "360", "feedback"],
+    "E": ["exercise", "assessment centre", "assessment center"],
+    "K": ["knowledge", "skills", "technical", "programming", "coding", "software", "java", "python", "sql", "excel"],
+    "P": ["personality", "behavior", "behaviour", "opq", "trait", "motivation", "values", "culture"],
+    "S": ["simulation", "game", "interactive"],
+}
 
-CATALOG_TEXTS = [item_to_text(item) for item in CATALOG]
 
-# ---------------------------------------------------------------------------
-# Build FAISS index
-# ---------------------------------------------------------------------------
-print("Loading embedding model...")
-EMBEDDER = SentenceTransformer("all-MiniLM-L6-v2")
+def item_to_tokens(item: dict) -> list[str]:
+    types_text = " ".join(TEST_TYPE_MAP.get(t, t) for t in item["test_types"])
+    remote = "remote" if item["remote_testing"] else ""
+    adaptive = "adaptive irt" if item["adaptive_irt"] else ""
+    text = f"{item['name']} {types_text} {remote} {adaptive}"
+    return tokenize(text)
 
-print("Building FAISS index...")
-embeddings = EMBEDDER.encode(CATALOG_TEXTS, show_progress_bar=False, normalize_embeddings=True)
-embeddings = np.array(embeddings, dtype="float32")
-INDEX = faiss.IndexFlatIP(embeddings.shape[1])  # inner product on normalized = cosine
-INDEX.add(embeddings)
-print(f"Index built: {INDEX.ntotal} items")
+
+def tokenize(text: str) -> list[str]:
+    text = text.lower()
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    return text.split()
+
+
+# Build BM25 index
+CORPUS_TOKENS = [item_to_tokens(item) for item in CATALOG]
+BM25 = BM25Okapi(CORPUS_TOKENS)
+CATALOG_URL_SET = {item["url"] for item in CATALOG}
+
+print(f"BM25 index built: {len(CATALOG)} items")
 
 # ---------------------------------------------------------------------------
 # Groq client
@@ -94,18 +100,21 @@ def health():
     return {"status": "ok"}
 
 
-def retrieve(query: str, k: int = 15) -> list[dict]:
-    """Semantic search over catalog."""
-    q_emb = EMBEDDER.encode([query], normalize_embeddings=True)
-    q_emb = np.array(q_emb, dtype="float32")
-    scores, indices = INDEX.search(q_emb, k)
-    results = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx >= 0:
-            item = CATALOG[idx].copy()
-            item["_score"] = float(score)
-            results.append(item)
-    return results
+def retrieve(query: str, k: int = 20) -> list[dict]:
+    """BM25 retrieval with type-keyword boosting."""
+    query_lower = query.lower()
+    query_tokens = tokenize(query)
+    scores = BM25.get_scores(query_tokens)
+
+    # Boost items whose test types match keywords in the query
+    for i, item in enumerate(CATALOG):
+        for type_code, keywords in TYPE_KEYWORDS.items():
+            if type_code in item["test_types"]:
+                if any(kw in query_lower for kw in keywords):
+                    scores[i] *= 1.4
+
+    top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+    return [CATALOG[i] for i in top_indices if scores[i] > 0]
 
 
 def format_catalog_context(items: list[dict]) -> str:
@@ -147,15 +156,13 @@ Response format — always end your reply with this exact JSON block:
 def chat(request: ChatRequest) -> ChatResponse:
     messages = request.messages
 
-    # Build query from conversation for retrieval
+    # Build retrieval query from recent user turns
     user_messages = [m.content for m in messages if m.role == "user"]
-    query = " ".join(user_messages[-3:])  # last 3 user turns
+    query = " ".join(user_messages[-3:])
 
-    # Retrieve relevant catalog items
     candidates = retrieve(query, k=20)
     catalog_context = format_catalog_context(candidates)
 
-    # Build messages for LLM
     llm_messages = [
         {
             "role": "system",
@@ -175,20 +182,27 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     reply_text = response.choices[0].message.content or ""
 
-    # Extract JSON block from reply
     recommendations: list[Recommendation] = []
     end_of_conversation = False
 
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", reply_text, re.DOTALL)
-    if json_match:
+    # Extract JSON: handle ```json...``` fences or raw {"recommend":...} in reply
+    def extract_json(text):
+        m = re.search(r"```json\s*(.+?)```", text, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r'(\{"recommend"\s*:.*\})', text, re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        return None
+
+    raw_json = extract_json(reply_text)
+    if raw_json:
         try:
-            data = json.loads(json_match.group(1))
+            data = json.loads(raw_json)
             end_of_conversation = bool(data.get("done", False))
             raw_recs = data.get("recommend", [])
-            # Validate against catalog
-            catalog_urls = {item["url"] for item in CATALOG}
             for rec in raw_recs:
-                if rec.get("url") in catalog_urls:
+                if rec.get("url") in CATALOG_URL_SET:
                     recommendations.append(
                         Recommendation(
                             name=rec.get("name", ""),
@@ -199,7 +213,6 @@ def chat(request: ChatRequest) -> ChatResponse:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Strip JSON block from reply text shown to user
     clean_reply = re.sub(r"```json.*?```", "", reply_text, flags=re.DOTALL).strip()
 
     return ChatResponse(
