@@ -133,19 +133,37 @@ def health():
 
 
 def retrieve(query: str, k: int = 10) -> list[dict]:
-    """BM25 retrieval with type-keyword boosting."""
+    """BM25 retrieval with type-keyword boosting, name-match bonus, and score threshold."""
     query_lower = query.lower()
     query_tokens = tokenize(query)
+    query_token_set = set(query_tokens)
     scores = BM25.get_scores(query_tokens).copy()
 
     for i, item in enumerate(CATALOG):
+        # Type-keyword boost: query signals this type → 1.5×
         for type_code, keywords in TYPE_KEYWORDS.items():
             if type_code in item["test_types"]:
                 if any(kw in query_lower for kw in keywords):
                     scores[i] *= 1.5
+                    break  # one boost per item regardless of multi-type
 
+        # Name-match bonus: each query token found in item name → 1.3× (max 2 tokens)
+        name_tokens = set(tokenize(item["name"]))
+        name_hits = min(len(name_tokens & query_token_set), 2)
+        if name_hits:
+            scores[i] *= 1.3 ** name_hits
+
+    # Relative score threshold: drop items below 20% of top score,
+    # but guarantee at least min(5, k) results by relaxing cutoff if needed.
+    max_score = float(scores.max()) if scores.max() > 0 else 1.0
     top_indices = sorted(range(len(scores)), key=lambda idx: scores[idx], reverse=True)[:k]
-    return [CATALOG[i] for i in top_indices if scores[i] > 0]
+    min_results = min(5, k)
+    for pct in (0.20, 0.10, 0.05, 0.0):
+        cutoff = pct * max_score
+        filtered = [CATALOG[i] for i in top_indices if scores[i] >= cutoff]
+        if len(filtered) >= min_results:
+            return filtered
+    return [CATALOG[i] for i in top_indices]
 
 
 def format_catalog_context(items: list[dict]) -> str:
