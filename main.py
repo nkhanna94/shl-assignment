@@ -172,11 +172,23 @@ def chat(request: ChatRequest) -> ChatResponse:
     candidates = retrieve(query, k=25)
     catalog_context = format_catalog_context(candidates)
 
-    # Inject turn awareness into system prompt
+    # Inject turn awareness + JD paste detection
     turn_note = ""
     if turn_number >= 5:
         turns_left = max(0, 8 - turn_number)
         turn_note = f"\n\nURGENT: This is turn {turn_number} of max 8. {turns_left} turns left. You MUST commit to recommendations now — no more clarifying questions."
+
+    last_user = user_messages[-1].lower() if user_messages else ""
+    jd_paste = any(p in last_user for p in [
+        "here is a text from job description",
+        "here is the job description",
+        "job description:",
+        "jd:",
+        "job spec:",
+        "here is a jd",
+    ])
+    if jd_paste:
+        turn_note += "\n\nCRITICAL: The user has pasted a job description. Extract the role, level, and required skills from it and IMMEDIATELY recommend 5-10 assessments. Do NOT ask any clarifying questions."
 
     llm_messages = [
         {
