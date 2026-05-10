@@ -22,13 +22,13 @@ def fetch(url: str) -> str:
         return r.read().decode("utf-8", errors="replace")
 
 
-def parse_rows(html: str, section: str) -> list:
-    idx = html.find(section)
+def parse_rows(page_html: str, section: str) -> list:
+    idx = page_html.find(section)
     if idx == -1:
         return []
 
-    next_section_idx = html.find('<th class="custom__table-heading__title">', idx + len(section))
-    section_html = html[idx:next_section_idx] if next_section_idx != -1 else html[idx:]
+    next_section_idx = page_html.find('<th class="custom__table-heading__title">', idx + len(section))
+    section_html = page_html[idx:next_section_idx] if next_section_idx != -1 else page_html[idx:]
 
     rows = []
     row_pattern = re.compile(r'<tr data-entity-id="(\d+)">(.*?)</tr>', re.DOTALL)

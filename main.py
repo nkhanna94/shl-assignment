@@ -132,7 +132,7 @@ def health():
     return {"status": "ok"}
 
 
-def retrieve(query: str, k: int = 25) -> list[dict]:
+def retrieve(query: str, k: int = 10) -> list[dict]:
     """BM25 retrieval with type-keyword boosting."""
     query_lower = query.lower()
     query_tokens = tokenize(query)
@@ -151,13 +151,8 @@ def retrieve(query: str, k: int = 25) -> list[dict]:
 def format_catalog_context(items: list[dict]) -> str:
     lines = []
     for item in items:
-        types = ", ".join(TEST_TYPE_MAP.get(t, t) for t in item["test_types"])
-        remote = "Yes" if item["remote_testing"] else "No"
-        adaptive = "Yes" if item["adaptive_irt"] else "No"
-        lines.append(
-            f"- {item['name']} | Types: {types} | Remote: {remote}"
-            f" | Adaptive: {adaptive} | URL: {item['url']}"
-        )
+        types = "".join(item["test_types"])
+        lines.append(f"{item['name']} [{types}] {item['url']}")
     return "\n".join(lines)
 
 
@@ -230,7 +225,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         user_messages = [m.content for m in messages if m.role == "user"]
         query = " ".join(user_messages)
 
-        candidates = retrieve(query, k=25)
+        candidates = retrieve(query, k=10)
         catalog_context = format_catalog_context(candidates)
 
         turn_note = ""
@@ -275,7 +270,7 @@ def chat(request: ChatRequest) -> ChatResponse:
                 model=MODEL,
                 messages=llm_messages,
                 temperature=0.1,
-                max_tokens=1500,
+                max_tokens=450,
             )
             reply_text = response.choices[0].message.content or ""
         except Exception as e:
@@ -317,7 +312,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         clean_reply = re.sub(r"```json.*?```", "", reply_text, flags=re.DOTALL).strip()
         clean_reply = re.sub(r'\{"recommend".*\}', "", clean_reply, flags=re.DOTALL).strip()
         if not clean_reply:
-            clean_reply = "Here are my recommendations based on your requirements."
+            clean_reply = "Here are the assessments that best match your requirements." if recommendations else "Could you share more details about the role?"
 
         return ChatResponse(
             reply=clean_reply,
@@ -328,7 +323,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     except Exception as e:
         logger.error("Unhandled error in /chat: %s", e, exc_info=True)
         return ChatResponse(
-            reply="Something went wrong. Please try again.",
+            reply="An error occurred. Please try your request again.",
             recommendations=[],
             end_of_conversation=False,
         )
