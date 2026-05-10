@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Scrape SHL Individual Test Solutions catalog."""
+import html
 import urllib.request
 import re
 import json
@@ -41,7 +42,7 @@ def parse_rows(html: str, section: str) -> list:
         if not link:
             continue
         url = BASE_URL + link.group(1).rstrip("/")
-        name = link.group(2).strip()
+        name = html.unescape(link.group(2).strip())
 
         tds = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
         remote_testing = len(tds) > 1 and '-yes' in tds[1]
