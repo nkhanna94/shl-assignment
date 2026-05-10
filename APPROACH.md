@@ -20,16 +20,19 @@ No session state is stored server-side. All context lives in the request payload
 
 **Scraping:** Crawled `shl.com/solutions/products/product-catalog/` across 32 paginated pages (12 items/page) using `urllib` + regex. Extracted 377 Individual Test Solutions with name, URL, test types (A/B/C/D/E/K/P/S), remote testing flag, and adaptive/IRT flag. Pre-packaged Job Solutions filtered out. Product names HTML-unescaped at scrape time.
 
-**Retrieval: BM25 + type-keyword boosting + role-context expansion**
+**Retrieval: BM25 + type-keyword boosting + role-context expansion + name-match bonus**
 
 Initially used `sentence-transformers` (all-MiniLM-L6-v2) + FAISS for semantic search. Dropped it — PyTorch stack exceeded Render's 512MB free-tier RAM. Switched to `rank-bm25` (pure Python, <5MB RAM).
 
-BM25 alone misses type intent ("personality test" → OPQ) and role intent ("analyst" → ability tests). Two layers compensate:
+BM25 alone misses type intent ("personality test" → OPQ) and role intent ("analyst" → ability tests). Three layers compensate:
 
-- **Type-keyword boost:** if the query contains role/domain words (e.g., "personality", "analyst", "stakeholder"), items of the matching test type get a 1.5× BM25 score multiplier.
-- **Role-context expansion:** each catalog item's BM25 document is enriched with domain synonyms for its test types (e.g., a type-P item also indexes "manager executive sales communication interpersonal team"). This bridges queries like "hiring a sales manager" to personality assessments without semantic embeddings.
+- **Role-context expansion:** each catalog item's BM25 document is enriched with domain synonyms for its test types (e.g., a type-P item also indexes "manager executive sales communication interpersonal team"). Bridges queries like "hiring a sales manager" to personality assessments without semantic embeddings.
+- **Type-keyword boost:** if the query contains role/domain words (e.g., "personality", "analyst", "stakeholder"), items of the matching test type get a 1.5× BM25 score multiplier (once per item regardless of multi-type).
+- **Name-match bonus:** each query token found directly in the item name adds a further 1.3× (capped at two matching tokens). Ensures `Java 8 (New)` outranks `Informatica (Developer)` for a "java developer" query even though both get the K-type boost.
 
-**Why not semantic search?** For a 377-item structured catalog, BM25 + boosting + expansion performs comparably, fits in 512MB, and adds zero latency.
+After all boosts, items below 20% of the top score are dropped. If that leaves fewer than 5 results, the cutoff relaxes (20%→10%→5%→0%) until five items are returned — preventing over-pruning for narrow catalogs (e.g., only one Python-specific test exists).
+
+**Why not semantic search?** For a 377-item structured catalog, BM25 + these three layers performs comparably, fits in 512MB, and adds zero latency.
 
 ---
 
